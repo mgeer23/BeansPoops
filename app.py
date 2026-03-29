@@ -111,6 +111,33 @@ def export_events():
     )
 
 
+@app.route("/api/events/export.json")
+def export_events_json():
+    db = get_db()
+    rows = db.execute("SELECT * FROM events ORDER BY timestamp ASC").fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/events/import", methods=["POST"])
+def import_events():
+    data = request.get_json()
+    if not isinstance(data, list):
+        return jsonify({"error": "Expected a JSON array of events"}), 400
+
+    db = get_db()
+    count = 0
+    for event in data:
+        if event.get("event_type") not in ("pee", "poo") or not event.get("timestamp"):
+            continue
+        db.execute(
+            "INSERT INTO events (event_type, timestamp, created_at) VALUES (?, ?, ?)",
+            (event["event_type"], event["timestamp"], event.get("created_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))),
+        )
+        count += 1
+    db.commit()
+    return jsonify({"imported": count}), 201
+
+
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000, debug=True)

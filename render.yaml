@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: beans-potty-log
+    runtime: docker
+    plan: free
+    disk:
+      name: beans-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: DB_PATH
+        value: /app/data/beans.db
