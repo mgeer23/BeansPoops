@@ -7,13 +7,24 @@ from datetime import datetime, timezone
 from flask import Flask, g, jsonify, render_template, request
 
 app = Flask(__name__)
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
 DB_PATH = os.environ.get("DB_PATH", "data/beans.db")
+
+USE_POSTGRES = DATABASE_URL is not None
+
+if USE_POSTGRES:
+    import psycopg2
+    import psycopg2.extras
 
 
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
+        if USE_POSTGRES:
+            g.db = psycopg2.connect(DATABASE_URL)
+        else:
+            g.db = sqlite3.connect(DB_PATH)
+            g.db.row_factory = sqlite3.Row
     return g.db
 
 
@@ -25,22 +36,75 @@ def close_db(exception):
 
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS events (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT NOT NULL CHECK(event_type IN ('pee', 'poo')),
-            timestamp  TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_events_timestamp
-        ON events(timestamp DESC)
-    """)
-    conn.commit()
-    conn.close()
+    if USE_POSTGRES:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id         SERIAL PRIMARY KEY,
+                event_type TEXT NOT NULL CHECK(event_type IN ('pee', 'poo')),
+                timestamp  TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_timestamp
+            ON events(timestamp DESC)
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+    else:
+        os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL CHECK(event_type IN ('pee', 'poo')),
+                timestamp  TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_timestamp
+            ON events(timestamp DESC)
+        """)
+        conn.commit()
+        conn.close()
+
+
+def db_execute(query, params=None):
+    """Execute a query, handling placeholder differences between SQLite and Postgres."""
+    db = get_db()
+    if USE_POSTGRES:
+        query = query.replace("?", "%s")
+        cur = db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(query, params or ())
+        return cur
+    else:
+        return db.execute(query, params or ())
+
+
+def db_fetchall(query, params=None):
+    cur = db_execute(query, params)
+    rows = cur.fetchall()
+    if USE_POSTGRES:
+        cur.close()
+        return rows
+    return [dict(r) for r in rows]
+
+
+def db_fetchone(query, params=None):
+    cur = db_execute(query, params)
+    row = cur.fetchone()
+    if USE_POSTGRES:
+        cur.close()
+        return dict(row) if row else None
+    return dict(row) if row else None
+
+
+def db_commit():
+    get_db().commit()
 
 
 @app.route("/")
@@ -58,41 +122,43 @@ def create_event():
     if not timestamp:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    db = get_db()
-    cursor = db.execute(
-        "INSERT INTO events (event_type, timestamp) VALUES (?, ?)",
-        (data["event_type"], timestamp),
-    )
-    db.commit()
+    if USE_POSTGRES:
+        row = db_fetchone(
+            "INSERT INTO events (event_type, timestamp) VALUES (?, ?) RETURNING *",
+            (data["event_type"], timestamp),
+        )
+    else:
+        cur = db_execute(
+            "INSERT INTO events (event_type, timestamp) VALUES (?, ?)",
+            (data["event_type"], timestamp),
+        )
+        row = db_fetchone("SELECT * FROM events WHERE id = ?", (cur.lastrowid,))
 
-    row = db.execute("SELECT * FROM events WHERE id = ?", (cursor.lastrowid,)).fetchone()
-    return jsonify(dict(row)), 201
+    db_commit()
+    return jsonify(row), 201
 
 
 @app.route("/api/events", methods=["GET"])
 def list_events():
     limit = request.args.get("limit", 50, type=int)
     offset = request.args.get("offset", 0, type=int)
-    db = get_db()
-    rows = db.execute(
+    rows = db_fetchall(
         "SELECT * FROM events ORDER BY timestamp DESC LIMIT ? OFFSET ?",
         (limit, offset),
-    ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    )
+    return jsonify(rows)
 
 
 @app.route("/api/events/<int:event_id>", methods=["DELETE"])
 def delete_event(event_id):
-    db = get_db()
-    db.execute("DELETE FROM events WHERE id = ?", (event_id,))
-    db.commit()
+    db_execute("DELETE FROM events WHERE id = ?", (event_id,))
+    db_commit()
     return "", 204
 
 
 @app.route("/api/events/export")
 def export_events():
-    db = get_db()
-    rows = db.execute("SELECT * FROM events ORDER BY timestamp ASC").fetchall()
+    rows = db_fetchall("SELECT * FROM events ORDER BY timestamp ASC")
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -113,9 +179,8 @@ def export_events():
 
 @app.route("/api/events/export.json")
 def export_events_json():
-    db = get_db()
-    rows = db.execute("SELECT * FROM events ORDER BY timestamp ASC").fetchall()
-    return jsonify([dict(r) for r in rows])
+    rows = db_fetchall("SELECT * FROM events ORDER BY timestamp ASC")
+    return jsonify(rows)
 
 
 @app.route("/api/events/import", methods=["POST"])
@@ -124,20 +189,22 @@ def import_events():
     if not isinstance(data, list):
         return jsonify({"error": "Expected a JSON array of events"}), 400
 
-    db = get_db()
     count = 0
     for event in data:
         if event.get("event_type") not in ("pee", "poo") or not event.get("timestamp"):
             continue
-        db.execute(
+        created = event.get("created_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        db_execute(
             "INSERT INTO events (event_type, timestamp, created_at) VALUES (?, ?, ?)",
-            (event["event_type"], event["timestamp"], event.get("created_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))),
+            (event["event_type"], event["timestamp"], created),
         )
         count += 1
-    db.commit()
+    db_commit()
     return jsonify({"imported": count}), 201
 
 
-if __name__ == "__main__":
+with app.app_context():
     init_db()
+
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
