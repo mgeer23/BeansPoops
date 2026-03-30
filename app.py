@@ -43,6 +43,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS events (
                 id         SERIAL PRIMARY KEY,
                 event_type TEXT NOT NULL CHECK(event_type IN ('pee', 'poo')),
+                accident   BOOLEAN NOT NULL DEFAULT FALSE,
                 timestamp  TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
             )
@@ -61,6 +62,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS events (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_type TEXT NOT NULL CHECK(event_type IN ('pee', 'poo')),
+                accident   INTEGER NOT NULL DEFAULT 0,
                 timestamp  TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
@@ -107,6 +109,13 @@ def db_commit():
     get_db().commit()
 
 
+def normalize_event(row):
+    """Normalize accident field to boolean for JSON responses."""
+    d = dict(row)
+    d["accident"] = bool(d.get("accident"))
+    return d
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -122,20 +131,23 @@ def create_event():
     if not timestamp:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    accident = bool(data.get("accident", False))
+    accident_val = accident if USE_POSTGRES else int(accident)
+
     if USE_POSTGRES:
         row = db_fetchone(
-            "INSERT INTO events (event_type, timestamp) VALUES (?, ?) RETURNING *",
-            (data["event_type"], timestamp),
+            "INSERT INTO events (event_type, accident, timestamp) VALUES (?, ?, ?) RETURNING *",
+            (data["event_type"], accident_val, timestamp),
         )
     else:
         cur = db_execute(
-            "INSERT INTO events (event_type, timestamp) VALUES (?, ?)",
-            (data["event_type"], timestamp),
+            "INSERT INTO events (event_type, accident, timestamp) VALUES (?, ?, ?)",
+            (data["event_type"], accident_val, timestamp),
         )
         row = db_fetchone("SELECT * FROM events WHERE id = ?", (cur.lastrowid,))
 
     db_commit()
-    return jsonify(row), 201
+    return jsonify(normalize_event(row)), 201
 
 
 @app.route("/api/events", methods=["GET"])
@@ -146,7 +158,7 @@ def list_events():
         "SELECT * FROM events ORDER BY timestamp DESC LIMIT ? OFFSET ?",
         (limit, offset),
     )
-    return jsonify(rows)
+    return jsonify([normalize_event(r) for r in rows])
 
 
 @app.route("/api/events/<int:event_id>", methods=["DELETE"])
@@ -162,9 +174,9 @@ def export_events():
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["id", "event_type", "timestamp", "created_at"])
+    writer.writerow(["id", "event_type", "accident", "timestamp", "created_at"])
     for row in rows:
-        writer.writerow([row["id"], row["event_type"], row["timestamp"], row["created_at"]])
+        writer.writerow([row["id"], row["event_type"], bool(row["accident"]), row["timestamp"], row["created_at"]])
 
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
     return (
@@ -180,7 +192,7 @@ def export_events():
 @app.route("/api/events/export.json")
 def export_events_json():
     rows = db_fetchall("SELECT * FROM events ORDER BY timestamp ASC")
-    return jsonify(rows)
+    return jsonify([normalize_event(r) for r in rows])
 
 
 @app.route("/api/events/import", methods=["POST"])
@@ -194,9 +206,46 @@ def import_events():
         if event.get("event_type") not in ("pee", "poo") or not event.get("timestamp"):
             continue
         created = event.get("created_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        accident = bool(event.get("accident", False))
+        accident_val = accident if USE_POSTGRES else int(accident)
         db_execute(
-            "INSERT INTO events (event_type, timestamp, created_at) VALUES (?, ?, ?)",
-            (event["event_type"], event["timestamp"], created),
+            "INSERT INTO events (event_type, accident, timestamp, created_at) VALUES (?, ?, ?, ?)",
+            (event["event_type"], accident_val, event["timestamp"], created),
+        )
+        count += 1
+    db_commit()
+    return jsonify({"imported": count}), 201
+
+
+@app.route("/api/events/import-csv", methods=["POST"])
+def import_csv():
+    """Import from Google Sheets CSV format: Datetime,Pee,Accident"""
+    if "file" in request.files:
+        text = request.files["file"].read().decode("utf-8")
+    else:
+        text = request.get_data(as_text=True)
+
+    reader = csv.DictReader(io.StringIO(text))
+    count = 0
+    for row in reader:
+        # Parse datetime from DD/MM/YYYY HH:MM format
+        dt_str = row.get("Datetime", "").strip()
+        if not dt_str:
+            continue
+        try:
+            dt = datetime.strptime(dt_str, "%d/%m/%Y %H:%M")
+        except ValueError:
+            continue
+
+        timestamp = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        pee = row.get("Pee", "").strip().upper() == "TRUE"
+        event_type = "pee" if pee else "poo"
+        accident = row.get("Accident", "").strip().upper() == "TRUE"
+        accident_val = accident if USE_POSTGRES else int(accident)
+
+        db_execute(
+            "INSERT INTO events (event_type, accident, timestamp, created_at) VALUES (?, ?, ?, ?)",
+            (event_type, accident_val, timestamp, timestamp),
         )
         count += 1
     db_commit()

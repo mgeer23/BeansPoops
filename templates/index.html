@@ -18,6 +18,7 @@
             --border: #e5e7eb;
             --danger: #ef4444;
             --success: #10b981;
+            --accident: #ef4444;
         }
 
         @media (prefers-color-scheme: dark) {
@@ -52,7 +53,7 @@
         .quick-buttons {
             display: flex;
             gap: 12px;
-            margin-bottom: 16px;
+            margin-bottom: 10px;
         }
 
         .btn-log {
@@ -81,6 +82,31 @@
 
         .btn-log.success {
             background: var(--success) !important;
+        }
+
+        .accident-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 10px;
+            margin-bottom: 16px;
+            cursor: pointer;
+            user-select: none;
+            font-size: 0.95rem;
+            color: var(--text-muted);
+        }
+
+        .accident-toggle input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+            accent-color: var(--accident);
+        }
+
+        .accident-toggle.active {
+            color: var(--accident);
+            font-weight: 600;
         }
 
         .past-toggle {
@@ -177,6 +203,19 @@
             text-transform: capitalize;
         }
 
+        .event-type .accident-badge {
+            display: inline-block;
+            background: var(--accident);
+            color: white;
+            font-size: 0.65rem;
+            padding: 1px 5px;
+            border-radius: 4px;
+            margin-left: 6px;
+            vertical-align: middle;
+            text-transform: uppercase;
+            font-weight: 700;
+        }
+
         .event-time {
             font-size: 0.8rem;
             color: var(--text-muted);
@@ -256,6 +295,10 @@
         <button class="btn-log btn-poo" onclick="logEvent('poo', null, this)">&#128169; Poo</button>
     </div>
 
+    <label class="accident-toggle" id="accident-toggle">
+        <input type="checkbox" id="accident-check" onchange="toggleAccidentStyle()"> Accident
+    </label>
+
     <span class="past-toggle" onclick="togglePast()">+ Log a past event</span>
 
     <div id="past-section" class="past-section">
@@ -278,7 +321,6 @@
     <script>
         let offset = 0;
         const LIMIT = 50;
-        let allLoaded = false;
 
         function showToast(msg) {
             const t = document.getElementById('toast');
@@ -287,13 +329,18 @@
             setTimeout(() => t.classList.remove('show'), 1500);
         }
 
+        function toggleAccidentStyle() {
+            const toggle = document.getElementById('accident-toggle');
+            const check = document.getElementById('accident-check');
+            toggle.classList.toggle('active', check.checked);
+        }
+
         function togglePast() {
             const s = document.getElementById('past-section');
             const toggle = document.querySelector('.past-toggle');
             s.classList.toggle('open');
             if (s.classList.contains('open')) {
                 toggle.textContent = '- Hide past event';
-                // Pre-fill with current local time
                 const now = new Date();
                 now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
                 document.getElementById('past-time').value = now.toISOString().slice(0, 16);
@@ -303,7 +350,8 @@
         }
 
         async function logEvent(type, timestamp, btn) {
-            const body = { event_type: type };
+            const accident = document.getElementById('accident-check').checked;
+            const body = { event_type: type, accident: accident };
             if (timestamp) body.timestamp = timestamp;
 
             const origText = btn.innerHTML;
@@ -322,9 +370,14 @@
                     btn.innerHTML = origText;
                 }, 800);
 
-                showToast(type === 'pee' ? 'Pee logged!' : 'Poo logged!');
+                const label = type === 'pee' ? 'Pee' : 'Poo';
+                showToast(label + (accident ? ' (accident)' : '') + ' logged!');
+
+                // Reset accident checkbox after logging
+                document.getElementById('accident-check').checked = false;
+                toggleAccidentStyle();
+
                 offset = 0;
-                allLoaded = false;
                 await loadHistory(true);
             } catch (e) {
                 showToast('Error - try again');
@@ -371,11 +424,12 @@
                         hour: 'numeric',
                         minute: '2-digit',
                     });
+                    const accidentBadge = ev.accident ? '<span class="accident-badge">accident</span>' : '';
 
                     row.innerHTML = `
                         <span class="event-icon">${icon}</span>
                         <div class="event-info">
-                            <div class="event-type">${ev.event_type}</div>
+                            <div class="event-type">${ev.event_type}${accidentBadge}</div>
                             <div class="event-time">${localTime}</div>
                         </div>
                         <button class="btn-delete" onclick="deleteEvent(${ev.id})" title="Delete">&#128465;</button>
