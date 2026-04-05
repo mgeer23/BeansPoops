@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from flask import Flask, g, jsonify, render_template, request
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "dev-key-change-me")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DB_PATH = os.environ.get("DB_PATH", "data/beans.db")
@@ -256,4 +257,4 @@ with app.app_context():
     init_db()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=os.environ.get("FLASK_ENV") != "production")

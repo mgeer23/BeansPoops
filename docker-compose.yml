@@ -1,8 +1,6 @@
 services:
   beans:
     build: .
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./data:/app/data
+    network_mode: "host"
+    env_file: .env
     restart: unless-stopped
